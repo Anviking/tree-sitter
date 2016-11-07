@@ -3,7 +3,7 @@
 #include "runtime/tree.h"
 #include "runtime/length.h"
 #include "runtime/utf16.h"
-#include "utf8proc.h"
+// #include "utf8proc.h"
 
 #define LOG(...)                                                              \
   if (self->logger.log) {                                                     \
@@ -37,11 +37,15 @@ static void ts_lexer__get_lookahead(Lexer *self) {
   const uint8_t *chunk = (const uint8_t *)self->chunk + position_in_chunk;
   size_t size = self->chunk_size - position_in_chunk + 1;
 
-  if (self->input.encoding == TSInputEncodingUTF8)
-    self->lookahead_size =
-      utf8proc_iterate(chunk, size, &self->data.lookahead);
-  else
-    self->lookahead_size = utf16_iterate(chunk, size, &self->data.lookahead);
+    if (self->input.encoding == TSInputEncodingUTF8) {
+        fprintf(stderr, "utf8 not supported\n");
+        exit(EXIT_FAILURE);
+        //    self->lookahead_size =
+        //      utf8proc_iterate(chunk, size, &self->data.lookahead);
+    }
+    else {
+        self->lookahead_size = utf16_iterate(chunk, size, &self->data.lookahead);
+    }
 
   LOG_LOOKAHEAD();
 }
