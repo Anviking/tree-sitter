@@ -38,7 +38,7 @@ static void ts_lexer__get_lookahead(Lexer *self) {
   uint32_t size = self->chunk_size - position_in_chunk + 1;
 
   if (self->input.encoding == TSInputEncodingUTF8)
-    exit(0)
+    exit(0);
     // I've removed utf8 support
     //self->lookahead_size =
     //  utf8proc_iterate(chunk, size, &self->data.lookahead);
