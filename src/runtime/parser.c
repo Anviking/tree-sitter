@@ -260,6 +260,7 @@ static Tree *parser__lex(Parser *self, StackVersion version) {
       LOG("skip_unrecognized_character");
       skipped_error = true;
       error_start_position = self->lexer.token_start_position;
+      error_end_position = self->lexer.token_start_position;
       first_error_character = self->lexer.data.lookahead;
     }
 
@@ -278,7 +279,6 @@ static Tree *parser__lex(Parser *self, StackVersion version) {
   if (skipped_error) {
     Length padding = length_sub(error_start_position, start_position);
     Length size = length_sub(error_end_position, error_start_position);
-    ts_lexer_reset(&self->lexer, error_end_position);
     result = ts_tree_make_error(size, padding, first_error_character);
   } else {
     TSSymbol symbol = self->lexer.data.result_symbol;
@@ -286,8 +286,11 @@ static Tree *parser__lex(Parser *self, StackVersion version) {
       symbol = self->language->external_scanner.symbol_map[symbol];
     }
 
+    if (length_has_unknown_chars(self->lexer.token_end_position)) {
+      self->lexer.token_end_position = self->lexer.current_position;
+    }
     Length padding = length_sub(self->lexer.token_start_position, start_position);
-    Length size = length_sub(self->lexer.current_position, self->lexer.token_start_position);
+    Length size = length_sub(self->lexer.token_end_position, self->lexer.token_start_position);
     TSSymbolMetadata metadata = ts_language_symbol_metadata(self->language, symbol);
     result = ts_tree_make_leaf(symbol, padding, size, metadata);
 
@@ -300,6 +303,7 @@ static Tree *parser__lex(Parser *self, StackVersion version) {
     }
   }
 
+  result->bytes_scanned = self->lexer.current_position.bytes - start_position.bytes + 1;
   result->parse_state = parse_state;
   result->first_leaf.lex_mode = lex_mode;
 
@@ -310,17 +314,6 @@ static Tree *parser__lex(Parser *self, StackVersion version) {
 static void parser__clear_cached_token(Parser *self) {
   ts_tree_release(self->cached_token);
   self->cached_token = NULL;
-}
-
-static inline bool ts_external_token_state_eq(const TSExternalTokenState *self,
-                                              const TSExternalTokenState *other) {
-  if (self == other) {
-    return true;
-  } else if (!self || !other) {
-    return false;
-  } else {
-    return memcmp(self, other, sizeof(TSExternalTokenState)) == 0;
-  }
 }
 
 static Tree *parser__get_lookahead(Parser *self, StackVersion version,
@@ -549,7 +542,7 @@ static StackPopResult parser__reduce(Parser *self, StackVersion version,
     // If this pop operation terminated at the end of an error region, then
     // create two stack versions: one in which the parent node is interpreted
     // normally, and one in which the parent node is skipped.
-    if (state == ERROR_STATE && allow_skipping) {
+    if (state == ERROR_STATE && allow_skipping && child_count > 1) {
       StackVersion other_version = ts_stack_copy_version(self->stack, slice.version);
 
       ts_stack_push(self->stack, other_version, parent, false, ERROR_STATE);
@@ -596,6 +589,7 @@ static inline const TSParseAction *parser__reductions_after_sequence(
     if (child_count == tree_count_below)
       break;
     Tree *tree = trees_below->contents[trees_below->size - 1 - i];
+    if (tree->extra) continue;
     TSStateId next_state = ts_language_next_state(self->language, state, tree->symbol);
     if (next_state == ERROR_STATE)
       return NULL;
@@ -607,6 +601,7 @@ static inline const TSParseAction *parser__reductions_after_sequence(
 
   for (uint32_t i = 0; i < trees_above->size; i++) {
     Tree *tree = trees_above->contents[i];
+    if (tree->extra) continue;
     TSStateId next_state = ts_language_next_state(self->language, state, tree->symbol);
     if (next_state == ERROR_STATE)
       return NULL;
@@ -738,7 +733,6 @@ static bool parser__repair_error(Parser *self, StackSlice slice,
   ReduceAction repair = session.best_repair;
   TSStateId next_state = session.best_repair_next_state;
   uint32_t skip_count = session.best_repair_skip_count;
-  uint32_t count_below = repair.count - session.tree_count_above_error;
   TSSymbol symbol = repair.symbol;
 
   StackSlice new_slice = array_pop(&pop.slices);
@@ -752,14 +746,13 @@ static bool parser__repair_error(Parser *self, StackSlice slice,
       ts_stack_remove_version(self->stack, other_slice.version);
   }
 
-  TreeArray skipped_children = array_new();
-  array_grow(&skipped_children, skip_count);
-  for (uint32_t i = count_below; i < children.size; i++)
-    array_push(&skipped_children, children.contents[i]);
-
+  TreeArray skipped_children = ts_tree_array_remove_last_n(&children, skip_count);
+  TreeArray trailing_extras = ts_tree_array_remove_trailing_extras(&skipped_children);
   Tree *error = ts_tree_make_error_node(&skipped_children);
-  children.size = count_below;
   array_push(&children, error);
+  array_push_all(&children, &trailing_extras);
+  trailing_extras.size = 0;
+  array_delete(&trailing_extras);
 
   for (uint32_t i = 0; i < slice.trees.size; i++)
     array_push(&children, slice.trees.contents[i]);

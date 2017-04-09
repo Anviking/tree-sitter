@@ -61,6 +61,44 @@ uint32_t ts_tree_array_essential_count(const TreeArray *self) {
   return result;
 }
 
+TreeArray ts_tree_array_remove_last_n(TreeArray *self, uint32_t remove_count) {
+  TreeArray result = array_new();
+  if (self->size == 0 || remove_count == 0) return result;
+
+  uint32_t count = 0;
+  uint32_t split_index = self->size - 1;
+  for (; split_index + 1 > 0; split_index--) {
+    Tree *tree = self->contents[split_index];
+    if (!tree->extra) {
+      count++;
+      if (count == remove_count) break;
+    }
+  }
+
+  array_grow(&result, self->size - split_index);
+  for (uint32_t i = split_index; i < self->size; i++) {
+    array_push(&result, self->contents[i]);
+  }
+
+  self->size = split_index;
+  return result;
+}
+
+TreeArray ts_tree_array_remove_trailing_extras(TreeArray *self) {
+  TreeArray result = array_new();
+
+  uint32_t i = self->size - 1;
+  for (; i + 1 > 0; i--) {
+    Tree *child = self->contents[i];
+    if (!child->extra) break;
+    array_push(&result, child);
+  }
+
+  self->size = i + 1;
+  array_reverse(&result);
+  return result;
+}
+
 Tree *ts_tree_make_error(Length size, Length padding, char lookahead_char) {
   Tree *result = ts_tree_make_leaf(ts_builtin_sym_error, padding, size,
                                      (TSSymbolMetadata){
@@ -117,7 +155,10 @@ void ts_tree_set_children(Tree *self, uint32_t child_count, Tree **children) {
     if (i == 0) {
       self->padding = child->padding;
       self->size = child->size;
+      self->bytes_scanned = child->bytes_scanned;
     } else {
+      uint32_t bytes_scanned = ts_tree_total_bytes(self) + child->bytes_scanned;
+      if (bytes_scanned > self->bytes_scanned) self->bytes_scanned = bytes_scanned;
       self->size = length_add(self->size, ts_tree_total_size(child));
     }
 
@@ -263,6 +304,21 @@ bool ts_tree_eq(const Tree *self, const Tree *other) {
   return true;
 }
 
+bool ts_tree_tokens_eq(const Tree *self, const Tree *other) {
+  if (self->child_count > 0 || other->child_count > 0) return false;
+  if (self->symbol != other->symbol) return false;
+  if (self->padding.bytes != other->padding.bytes) return false;
+  if (self->size.bytes != other->size.bytes) return false;
+  if (self->extra != other->extra) return false;
+  if (self->has_external_token_state) {
+    if (!other->has_external_token_state) return false;
+    if (!ts_external_token_state_eq(&self->external_token_state, &other->external_token_state)) return false;
+  } else {
+    if (other->has_external_token_state) return false;
+  }
+  return true;
+}
+
 int ts_tree_compare(const Tree *left, const Tree *right) {
   if (left->symbol < right->symbol)
     return -1;
@@ -289,6 +345,21 @@ int ts_tree_compare(const Tree *left, const Tree *right) {
 
 static inline long min(long a, long b) {
   return a <= b ? a : b;
+}
+
+bool ts_tree_invalidate_lookahead(Tree *self, uint32_t edit_byte_offset) {
+  if (edit_byte_offset >= self->bytes_scanned) return false;
+  self->has_changes = true;
+  if (self->child_count > 0) {
+    uint32_t child_start_byte = 0;
+    for (uint32_t i = 0; i < self->child_count; i++) {
+      Tree *child = self->children[i];
+      if (child_start_byte > edit_byte_offset) break;
+      ts_tree_invalidate_lookahead(child, edit_byte_offset - child_start_byte);
+      child_start_byte += ts_tree_total_bytes(child);
+    }
+  }
+  return true;
 }
 
 
@@ -337,29 +408,27 @@ void ts_tree_edit(Tree *self, const TSInputEdit *edit) {
   for (uint32_t i = 0; i < self->child_count; i++) {
     Tree *child = self->children[i];
     child_left = child_right;
+    child_right = length_add(child_left, ts_tree_total_size(child));
 
-    if (!found_first_child) {
-      child_right = length_add(child_left, ts_tree_total_size(child));
-      if (child_right.bytes >= edit->start_byte) {
-        found_first_child = true;
-        TSInputEdit child_edit = {
-          .start_byte = edit->start_byte - child_left.bytes,
-          .bytes_added = edit->bytes_added,
-          .bytes_removed = edit->bytes_removed,
-          .start_point = point_sub(edit->start_point, child_left.extent),
-          .extent_added = edit->extent_added,
-          .extent_removed = edit->extent_removed,
-        };
+    if (!found_first_child && child_right.bytes >= edit->start_byte) {
+      found_first_child = true;
+      TSInputEdit child_edit = {
+        .start_byte = edit->start_byte - child_left.bytes,
+        .bytes_added = edit->bytes_added,
+        .bytes_removed = edit->bytes_removed,
+        .start_point = point_sub(edit->start_point, child_left.extent),
+        .extent_added = edit->extent_added,
+        .extent_removed = edit->extent_removed,
+      };
 
-        if (old_end_byte > child_right.bytes) {
-          child_edit.bytes_removed = child_right.bytes - edit->start_byte;
-          child_edit.extent_removed = point_sub(child_right.extent, edit->start_point);
-          remaining_bytes_to_delete = old_end_byte - child_right.bytes;
-          remaining_extent_to_delete = point_sub(old_end_point, child_right.extent);
-        }
-
-        ts_tree_edit(child, &child_edit);
+      if (old_end_byte > child_right.bytes) {
+        child_edit.bytes_removed = child_right.bytes - edit->start_byte;
+        child_edit.extent_removed = point_sub(child_right.extent, edit->start_point);
+        remaining_bytes_to_delete = old_end_byte - child_right.bytes;
+        remaining_extent_to_delete = point_sub(old_end_point, child_right.extent);
       }
+
+      ts_tree_edit(child, &child_edit);
     } else if (remaining_bytes_to_delete > 0) {
       TSInputEdit child_edit = {
         .start_byte = 0,
@@ -372,6 +441,8 @@ void ts_tree_edit(Tree *self, const TSInputEdit *edit) {
       remaining_bytes_to_delete -= child_edit.bytes_removed;
       remaining_extent_to_delete = point_sub(remaining_extent_to_delete, child_edit.extent_removed);
       ts_tree_edit(child, &child_edit);
+    } else {
+      ts_tree_invalidate_lookahead(child, edit->start_byte - child_left.bytes);
     }
 
     child_right = length_add(child_left, ts_tree_total_size(child));
@@ -484,4 +555,15 @@ void ts_tree_print_dot_graph(const Tree *self, const TSLanguage *language,
   fprintf(f, "edge [arrowhead=none]\n");
   ts_tree__print_dot_graph(self, 0, language, f);
   fprintf(f, "}\n");
+}
+
+bool ts_external_token_state_eq(const TSExternalTokenState *self,
+                                const TSExternalTokenState *other) {
+  if (self == other) {
+    return true;
+  } else if (!self || !other) {
+    return false;
+  } else {
+    return memcmp(self, other, sizeof(TSExternalTokenState)) == 0;
+  }
 }

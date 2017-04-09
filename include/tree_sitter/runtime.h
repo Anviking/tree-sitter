@@ -9,7 +9,7 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-#define TREE_SITTER_LANGUAGE_VERSION 1
+#define TREE_SITTER_LANGUAGE_VERSION 2
 
 typedef unsigned short TSSymbol;
 typedef struct TSLanguage TSLanguage;
@@ -104,6 +104,7 @@ void ts_document_set_language(TSDocument *, const TSLanguage *);
 TSInput ts_document_input(TSDocument *);
 void ts_document_set_input(TSDocument *, TSInput);
 void ts_document_set_input_string(TSDocument *, const char *);
+void ts_document_set_input_string_with_length(TSDocument *, const char *, uint32_t);
 TSLogger ts_document_logger(const TSDocument *);
 void ts_document_set_logger(TSDocument *, TSLogger);
 void ts_document_print_debugging_graphs(TSDocument *, bool);
